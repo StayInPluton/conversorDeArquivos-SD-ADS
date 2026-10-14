@@ -1,0 +1,106 @@
+x-backend-environment: &backend-environment
+  DATABASE_URL: postgresql://postgres:postgrespassword@db:5432/app_db
+  RABBITMQ_HOST: rabbitmq
+  MINIO_ENDPOINT: seaweedfs:8333
+  MINIO_ACCESS_KEY: any_key
+  MINIO_SECRET_KEY: any_secret
+  PUBLIC_MINIO_URL: http://localhost:9000
+
+services:
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.59
+    container_name: seaweedfs_s3
+    command: "server -s3"
+    ports:
+      - "9000:8333"   # Porta S3 exposta na 9000
+      - "9001:9333"   # Console UI
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  db:
+    image: postgres:15-alpine
+    container_name: postgres_db
+    environment:
+      POSTGRES_DB: app_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mailpit:
+    image: axllent/mailpit
+    container_name: mailpit
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  api:
+    build: ./backend
+    container_name: api_ingestao
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment: *backend-environment
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+
+  worker:
+    build: ./backend
+    command: python worker.py
+    deploy:
+      replicas: 2
+    environment: *backend-environment
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+
+  notifier:
+    build: ./backend
+    container_name: notification_service
+    command: python notifier.py
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mailpit:
+        condition: service_started
+
+  frontend:
+    build: ./frontend
+    container_name: frontend_nextjs
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - api
